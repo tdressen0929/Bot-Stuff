@@ -29,7 +29,7 @@ def get_cheapest_print(card_name, secret_lair_only=False):
 
       if secret_lair_only:
           #filters for only secret lair cards
-          cards = [c for c in cards if c.get('set', '').starswith('sl')]
+          cards = [c for c in cards if c.get('set', '').startswith('sl')]
       else:
           #filter out secret lair prints
           cards = [c for c in cards if not c.get('set', '').startswith('sl')]
