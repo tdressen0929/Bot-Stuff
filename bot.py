@@ -90,6 +90,11 @@ async def post_daily_card():
           if channel:
                await channel.send(embed=embed)
 
+#Runs at 7am CST everyday
+@tasks.loop(time=time(hour=12, minute=0))
+async def daily_card():
+     await post_daily_card()
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
