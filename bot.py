@@ -157,7 +157,7 @@ async def card(interaction: discord.Interaction, card_name: str, set_code: str =
 
                     if 'image_uris' in cheapest:
                          cheapest_embed.set_image(url=cheapest['image_uris']['normal'])
-                    cheapest_embed.add_field(name='Cheapest Option', value=f'{cheapest["cheapest_type"]}: ${cheapest["cheapest_price"]}:.2f')
+                    cheapest_embed.add_field(name='Cheapest Option', value=f'{cheapest["cheapest_type"]}: ${cheapest["cheapest_price"]:.2f}')
                     await interaction.response.send_message(embed=cheapest_embed)
                else:
                     await interaction.response.send_message('Could not find any prints')
