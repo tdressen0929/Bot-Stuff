@@ -17,7 +17,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-DAILY_CARD_CHANNEL_ID = 'CHANNEL_TOKEN'
+DAILY_CARD_CHANNEL_ID = int(os.getenv('CHANNEL_TOKEN'))
 
 def get_cheapest_print(card_name, secret_lair_only=False):
       headers = {'User-Agent': 'boooot', 'Accept': 'application/json'}
@@ -89,8 +89,10 @@ async def post_daily_card():
           channel = bot.get_channel(DAILY_CARD_CHANNEL_ID)
           if channel:
                await channel.send(embed=embed)
+          else:
+               print(f'Channel {DAILY_CARD_CHANNEL_ID} not found')
 
-#Runs at 7am CST everyday
+#Runs at 7am CDT everyday
 @tasks.loop(time=time(hour=12, minute=0))
 async def daily_card():
      await post_daily_card()
@@ -98,6 +100,9 @@ async def daily_card():
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
+    if not daily_card.is_running():
+         daily_card.start()
+         print('Daily card loop started')
     #Sync slash commands(potential to take up to an hour)
     await bot.tree.sync()
     print('Slash commands synced')
