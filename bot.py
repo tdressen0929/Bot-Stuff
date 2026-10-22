@@ -5,25 +5,43 @@ import requests
 import os
 from dotenv import load_dotenv
 import ssl
-from datetime import time
+from datetime import time, date
+import re
+from zoneinfo import ZoneInfo
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
-load_dotenv(dotenv_path='C:/Users/Thomas/Desktop/Bot Stuff/.env')
+HEADERS = {'User-Agent': 'boooot', 'Accept': 'application/json'}
 
+DAILY_CARD_CHANNEL_ID = int(os.getenv('CHANNEL_TOKEN'))
+load_dotenv()
+# ^ if bot breaks, probably was this code
 
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-DAILY_CARD_CHANNEL_ID = int(os.getenv('CHANNEL_TOKEN'))
+keyword_list = []
+
+#-----------------------------------------HELPERS------------------------------------------------------
+
+def get_card_image(data):
+     #Returns iamge URL to help with double faced cards
+     if 'image_uris' in data:
+          return data['image_uris']['normal']
+     if 'card_faces' in data and 'image_uris' in data['card_faces'][0]:
+          return data['card_faces'][0]['image_uris']['normal']
+     return None
+
+def get_legal_formats(data):
+     legal = [fmt.capitalize() for fmt, status in data['legalities'].items() if status == 'legal']
+     return ', '.join(legal) if legal else 'None'
+
 
 def get_cheapest_print(card_name, secret_lair_only=False):
-      headers = {'User-Agent': 'boooot', 'Accept': 'application/json'}
-
       #Get all prints of a card
-      response = requests.get(f'https://api.scryfall.com/cards/search?q=!"{card_name}"&unique=prints', headers=headers)
+      response = requests.get(f'https://api.scryfall.com/cards/search', params={'q': f'!"{card_name}"', 'unique': 'prints'}, headers=HEADERS)
 
       if response.status_code != 200:
           return None
@@ -58,117 +76,189 @@ def get_cheapest_print(card_name, secret_lair_only=False):
 
       return cheapest
 
-async def post_daily_card():
-     headers = {'User-Agent': 'boooot', 'Accept': 'application/json'}
-     response = requests.get('https://api.scryfall.com/cards/random', params={'q': '-t:land'}, headers=headers)
+def build_cheapest_button(name, secret_lair_only=False):
+     label = 'Find Cheapest SL Printing' if secret_lair_only else 'Find Cheapest Printing'
+     button = Button(label=label, style=discord.ButtonStyle.red)
 
-     if response.status_code == 200:
-          data = response.json()
+     async def button_callback(interaction):
+          await interaction.response.defer()
+          cheapest = get_cheapest_print(name, secret_lair_only=secret_lair_only)
 
-          name = data['name']
-          set_name = data['set_name']
-          prices = data['prices']
-          usd = prices.get('usd', 'N/A')
-          usd_foil = prices.get('usd_foil', 'N/A')
-
-          legalities = data['legalities']
-          legal_formats = [fmt.capitalize() for fmt, status in legalities.items() if status == 'legal']
-          legal_str = ', '.join(legal_formats) if legal_formats else 'None'
-
-          embed = discord.Embed(title=f'Card of the Day: {name} - {set_name}')
-
-          if 'image_uris' in data:
-               embed.set_image(url=data['image_uris']['normal'])
-          elif 'card_faces' in data:
-               embed.set_image(url=data['card_faces'][0]['image_uris']['normal'])
-
-          embed.add_field(name='Price', value=f'${usd}')
-          embed.add_field(name='Foil Price', value=f'${usd_foil}')
-          embed.add_field(name='Legal In', value=legal_str, inline=False)
-
-          channel = bot.get_channel(DAILY_CARD_CHANNEL_ID)
-          if channel:
-               await channel.send(embed=embed)
+          if cheapest:
+               prefix = 'SL ' if secret_lair_only else ''
+               embed = discord.Embed(title=f'Cheapest {prefix} Printing: {cheapest["name"]} - {cheapest["set_name"]}')
+               image = get_card_image(cheapest)
+               if image:
+                    embed.set_image(url=image)
+               embed.add_field(name='Cheapest Printing', value=f'{cheapest["cheapest_type"]}: ${cheapest["cheapest_price"]:.2f}')
+               await interaction.followup.send(embed=embed)
           else:
+               await interaction.followup.send('Could not find any prints')
+
+     button.callback = button_callback
+     view = View(timeout=None)
+     view.add_item(button)
+     return view
+
+def get_newest_set_code():
+     response = requests.get('https://api.scryfall.com/sets', headers=HEADERS)
+
+     if response.status_code != 200:
+          return None
+
+     today = date.today().isoformat()
+
+     released = [s for s in response.json().get('data', []) if s.get('released_at') and s['released_at'] <= today and s.get('set_type') in ('core', 'expansion')]
+
+     if not released:
+          return None
+
+     newest = max(released, key=lambda s: s['released_at'])
+     return newest['code']
+
+
+def find_reminder_text(cards, keyword_name):
+     #Matches a line starting wit hthe keyword, the the reminder text in parentheses
+     pattern = re.compile(rf'^{re.escape(keyword_name)}\b[^\n(]*\(([^)]+)\)', re.IGNORECASE | re.MULTILINE)
+
+     for card in cards:
+          #Double faced keep their text inside card-faces
+          texts = [card.get('oracle_text', '')]
+          texts += [face.get('oracle_text', '') for face in card.get('card_faces', [])]
+
+          for text in texts:
+               match = pattern.search(text)
+               if match:
+                    return match.group(1)
+     return None
+
+def load_keywords():
+     for endpoint in ('keyword-abilities', 'keyword-actions'):
+          r = requests.get(f'https://api.scryfall.com/catalog/{endpoint}', headers=HEADERS)
+          if r.status_code == 200:
+               keyword_list.extend(r.json().get('data', []))
+
+#----------------------------DAILY CARD-----------------------------
+
+async def post_daily_card():
+     qurey = '-t:land'
+     newest_set = get_newest_set_code()
+     if newest_set:
+          query += f' -in:{newest_set}'
+
+     response = requests.get('https://api.scryfall.com/cards/random', params={'q': query}, headers=HEADERS)
+
+     if response.status_code != 200:
+          print(f'Daily card request failed: {response.status_code}')
+          return
+
+     data = response.json()
+     prices = data['prices']
+
+     embed = discord.Embed(title=f'Card of the Day: {data["name"]} - {data["set_name"]}')
+
+     image = get_card_image(data)
+     if image:
+          embed.set_image(url=image)
+
+     embed.add_field(name='Price', value=f'${prices.get("usd") or "N/A"}')
+     embed.add_field(name='Foil Price', value=f'${prices.get("usd_foil" or "N/A")}')
+     embed.add_field(name='Legal In', value=get_legal_formats(data), inline=False)
+
+     view = build_cheapest_button(data["name"])
+
+     channel = bot.get_channel(DAILY_CARD_CHANNEL_ID)
+     if channel is None:
+          try:
+               channel = await bot.fetch_channel(DAILY_CARD_CHANNEL_ID)
+          except discord.NotFound:
                print(f'Channel {DAILY_CARD_CHANNEL_ID} not found')
+          except discord.Forbidden:
+               print('boooot does not have permission to see that channel')
+
+     if channel:
+          await channel.send(embed=embed, view=view)
+
 
 #Runs at 7am CDT everyday
-@tasks.loop(time=time(hour=12, minute=0))
+@tasks.loop(time=time(hour=12, minute=0, tzinfo=ZoneInfo('America/Chicago')))
 async def daily_card():
+     print('Printing daily card')
      await post_daily_card()
+
+#----------------------BOT EVENTS--------------------
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
+    if not keyword_list:
+         load_keywords()
+
     if not daily_card.is_running():
          daily_card.start()
          print('Daily card loop started')
+
     #Sync slash commands(potential to take up to an hour)
     await bot.tree.sync()
     print('Slash commands synced')
 
-@bot.tree.command(name='card', description='Name of the card you want to search')
+#--------------------SLASH COMMANDS--------------------
+
+@bot.tree.command(name='card', description='Name of the MtG card you want to search')
 async def card(interaction: discord.Interaction, card_name: str, set_code: str = None):
-     headers = {'User-Agent': 'boooot', 'Accept': 'application/json'}
+     await interaction.response.defer()
 
+     params = {'fuzzy': card_name}
      if set_code:
-          url = f'https://api.scryfall.com/cards/named?fuzzy={card_name}&set={set_code}'
-     else:
-          url = f'https://api.scryfall.com/cards/named?fuzzy={card_name}'
+          params['set'] = set_code
 
-     response = requests.get(url, headers=headers)
+     response = requests.get('https://api.scryfall.com/cards/named', params=params, headers=HEADERS)
 
-     if response.status_code == 200:
-          data = response.json()
+     if response.status_code != 200:
+          await interaction.followup.send(f'Card not found: {card_name}')
+          return
 
-          name = data['name']
-          image = data['image_uris']['normal']
-          set_name = data['set_name']
-          prices = data['prices']
-          is_secret_lair = data.get('set', '').startswith('sl')
+     data = response.json()
+     prices = data['prices']
+     is_secret_lair = data.get('set', '').startswith('sl')
 
-          usd = prices.get('usd', 'N/A')
-          usd_foil = prices.get('usd_foil', 'N/A')
+     embed = discord.Embed(title=f'{data["name"]} - {data["set_name"]}')
 
-          #Find legality
-          legalities = data['legalities']
-          legal_formats = [fmt.capitalize() for fmt, status in legalities.items() if status == 'legal']
-          legal_str = ', '.join(legal_formats) if legal_formats else 'None'
-
-          embed = discord.Embed(title=name)
+     image = get_card_image(data)
+     if image:
           embed.set_image(url=image)
-          embed.add_field(name='Price', value=f'${usd}')
-          embed.add_field(name='Foil Price', value=f'${usd_foil}')
-          embed.add_field(name='Legal in', value=legal_str, inline=False)
 
-          #Finds if card is a secret lair card and changes button text accordingly
-          if is_secret_lair:
-               button_label = 'Find Cheapest SL Printing'
-          else:
-               button_label = 'Find Cheapest Printing'
+     embed.add_field(name='Price', value=f'${prices.get("usd") or "N/A"}')
+     embed.add_field(name='Foil Price', value=f'${prices.get("usd_foil" or "N/A")}')
+     embed.add_field(name='Legal In', value=get_legal_formats(data), inline=False)
 
-          button = Button(label=button_label, style=discord.ButtonStyle.green)
+     view = build_cheapest_button(data["name"], secret_lair_only=is_secret_lair)
 
-          async def button_callback(interaction):
-               cheapest = get_cheapest_print(name, secret_lair_only=is_secret_lair)
+     await interaction.followup.send(embed=embed, view=view)
 
-               if cheapest:
-                    cheapest_embed = discord.Embed(title=f'Cheapest {"Secret Lair " if is_secret_lair else ""} Printing: {cheapest["name"]} - {cheapest["set_name"]}')
 
-                    if 'image_uris' in cheapest:
-                         cheapest_embed.set_image(url=cheapest['image_uris']['normal'])
-                    cheapest_embed.add_field(name='Cheapest Option', value=f'{cheapest["cheapest_type"]}: ${cheapest["cheapest_price"]:.2f}')
-                    await interaction.response.send_message(embed=cheapest_embed)
-               else:
-                    await interaction.response.send_message('Could not find any prints')
+@bot.tree.command(name='keyword', description='Grabs reminder text for a keyword')
+async def keyword(interaction: discord.Interaction, keyword_name: str):
+     await interaction.response.defer()
 
-          button.callback = button_callback
+     response = requests.get('https://api.scryfall.com/cards/search', params={'q': f'keyword:"{keyword_name}"', 'order': 'released', 'dir': 'desc', 'unique': 'cards'}, headers=HEADERS)
 
-          view = View()
-          view.add_item(button)
+     if response.status_code != 200:
+          await interaction.followup.send(f'No cards found with the keyword "{keyword_name}"')
+          return
 
-          await interaction.response.send_message(embed=embed, view=view)
+     cards = response.json().get('data', [])
+     reminder = find_reminder_text(cards, keyword_name)
+
+     if reminder:
+          embed = discord.Embed(title=keyword_name.title(), description=reminder)
+          await interaction.followup.send(embed=embed)
      else:
-          await interaction.response.send_message(f'Card not found: {card_name}')
+          await interaction.followup.send(f'Found cards with "{keyword_name}, but none contained reminder text')
+
+@keyword.autocomplete('keyword_name')
+async def keyword_autocomplete(interaction: discord.Interaction, current: str):
+     matches = [k for k in keyword_list if current.lower() in k.lower()]
+     return [discord.app_commands.Choice(name=k, vlaue=k) for k in matches[:25]]
 
 bot.run(os.getenv('DISCORD_TOKEN'))
