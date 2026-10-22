@@ -259,6 +259,6 @@ async def keyword(interaction: discord.Interaction, keyword_name: str):
 @keyword.autocomplete('keyword_name')
 async def keyword_autocomplete(interaction: discord.Interaction, current: str):
      matches = [k for k in keyword_list if current.lower() in k.lower()]
-     return [discord.app_commands.Choice(name=k, vlaue=k) for k in matches[:25]]
+     return [discord.app_commands.Choice(name=k, value=k) for k in matches[:25]]
 
 bot.run(os.getenv('DISCORD_TOKEN'))
